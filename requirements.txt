@@ -1,0 +1,59 @@
+# =============================================================================
+# AI Workflow Orchestration Platform — Python Dependencies
+# =============================================================================
+
+# FastAPI + server
+fastapi==0.110.0
+uvicorn[standard]==0.27.1
+python-multipart==0.0.9
+
+# LangChain + OpenAI
+langchain==0.1.12
+langchain-openai==0.0.8
+openai==1.12.0
+
+# Vector DB
+chromadb==0.4.24
+
+# HTTP
+requests==2.31.0
+aiohttp==3.9.3
+httpx==0.27.0
+
+# Database
+sqlalchemy==2.0.27
+asyncpg==0.29.0
+psycopg2-binary==2.9.9
+alembic==1.13.1
+
+# Observability
+opentelemetry-api==1.23.0
+opentelemetry-sdk==1.23.0
+opentelemetry-instrumentation-fastapi==0.44b0
+opentelemetry-exporter-otlp-proto-grpc==1.23.0
+prometheus-fastapi-instrumentator==6.1.0
+
+# Security
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# Data & ML
+numpy==1.26.4
+pandas==2.2.0
+
+# Utilities
+pydantic==2.6.1
+pydantic-settings==2.2.1
+python-dotenv==1.0.1
+tenacity==8.2.3        # Retry logic for LLM calls
+psutil==5.9.8
+
+# Testing
+pytest==8.0.2
+pytest-asyncio==0.23.5
+pytest-cov==4.1.0
+httpx==0.27.0           # For TestClient
+
+# Dev tools
+ruff==0.3.0
+mypy==1.8.0

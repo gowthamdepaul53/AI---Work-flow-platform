@@ -1,0 +1,265 @@
+{
+  "name": "Customer Support Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "support-ticket",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook — New Ticket",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "webhookId": "support-ticket-inbound"
+    },
+    {
+      "parameters": {
+        "url": "http://api:8000/api/v1/rag/query",
+        "authentication": "none",
+        "method": "POST",
+        "bodyParametersUi": {
+          "parameter": [
+            {
+              "name": "question",
+              "value": "={{ $json.ticket_text }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "rag-retrieval",
+      "name": "RAG — Knowledge Retrieval",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://api:8000/api/v1/workflow/summarize",
+        "method": "POST",
+        "bodyParametersUi": {
+          "parameter": [
+            {
+              "name": "task",
+              "value": "={{ $('Webhook — New Ticket').item.json.ticket_text }}"
+            },
+            {
+              "name": "context",
+              "value": "={{ { \"doc_type\": \"ticket\", \"rag_context\": $json.answer } }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "summarizer-agent",
+      "name": "Summarizer Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [750, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.metadata.urgency }}",
+              "operation": "equals",
+              "value2": "CRITICAL"
+            }
+          ]
+        }
+      },
+      "id": "urgency-router",
+      "name": "Urgency Router",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1000, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://api:8000/api/v1/workflow/support-ticket",
+        "method": "POST",
+        "bodyParametersUi": {
+          "parameter": [
+            {
+              "name": "ticket_id",
+              "value": "={{ $('Webhook — New Ticket').item.json.ticket_id }}"
+            },
+            {
+              "name": "customer_name",
+              "value": "={{ $('Webhook — New Ticket').item.json.customer_name }}"
+            },
+            {
+              "name": "ticket_text",
+              "value": "={{ $('Webhook — New Ticket').item.json.ticket_text }}"
+            },
+            {
+              "name": "urgency",
+              "value": "={{ $('Webhook — New Ticket').item.json.urgency }}"
+            }
+          ]
+        }
+      },
+      "id": "responder-agent",
+      "name": "Responder Agent — Generate Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1250, 200]
+    },
+    {
+      "parameters": {
+        "url": "http://api:8000/api/v1/workflow/support-ticket",
+        "method": "POST",
+        "bodyParametersUi": {
+          "parameter": [
+            {
+              "name": "ticket_id",
+              "value": "={{ $('Webhook — New Ticket').item.json.ticket_id }}"
+            },
+            {
+              "name": "ticket_text",
+              "value": "={{ $('Webhook — New Ticket').item.json.ticket_text }}"
+            },
+            {
+              "name": "urgency",
+              "value": "CRITICAL"
+            },
+            {
+              "name": "require_hitl",
+              "value": true
+            }
+          ]
+        }
+      },
+      "id": "hitl-escalation",
+      "name": "HITL — Human Escalation Queue",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1250, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.flagged }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "safety-check",
+      "name": "Safety Check — Flagged?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1500, 200]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "post",
+        "channel": "support-alerts",
+        "text": "=:warning: Ticket {{ $('Webhook — New Ticket').item.json.ticket_id }} flagged for review.\n*Reason:* {{ $json.flag_reason }}\n*Ticket:* {{ $('Webhook — New Ticket').item.json.ticket_text.substring(0, 200) }}..."
+      },
+      "id": "slack-alert",
+      "name": "Slack — Alert Ops Team",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [1750, 100],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-creds",
+          "name": "Slack API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "ticket_responses",
+        "columns": "ticket_id,summary,response,tokens_used,flagged,hitl_status,created_at",
+        "additionalFields": {}
+      },
+      "id": "postgres-store",
+      "name": "PostgreSQL — Store Response",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [1750, 350],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-creds",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ \"status\": \"processed\", \"ticket_id\": $('Webhook — New Ticket').item.json.ticket_id, \"response\": $('Responder Agent — Generate Reply').item.json.response }) }}"
+      },
+      "id": "webhook-response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2000, 300]
+    }
+  ],
+  "connections": {
+    "Webhook — New Ticket": {
+      "main": [
+        [{ "node": "RAG — Knowledge Retrieval", "type": "main", "index": 0 }]
+      ]
+    },
+    "RAG — Knowledge Retrieval": {
+      "main": [
+        [{ "node": "Summarizer Agent", "type": "main", "index": 0 }]
+      ]
+    },
+    "Summarizer Agent": {
+      "main": [
+        [{ "node": "Urgency Router", "type": "main", "index": 0 }]
+      ]
+    },
+    "Urgency Router": {
+      "main": [
+        [{ "node": "Responder Agent — Generate Reply", "type": "main", "index": 0 }],
+        [{ "node": "HITL — Human Escalation Queue", "type": "main", "index": 0 }]
+      ]
+    },
+    "Responder Agent — Generate Reply": {
+      "main": [
+        [{ "node": "Safety Check — Flagged?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Safety Check — Flagged?": {
+      "main": [
+        [{ "node": "Slack — Alert Ops Team", "type": "main", "index": 0 }],
+        [{ "node": "PostgreSQL — Store Response", "type": "main", "index": 0 }]
+      ]
+    },
+    "PostgreSQL — Store Response": {
+      "main": [
+        [{ "node": "Webhook Response", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "error-handler-workflow"
+  },
+  "staticData": null,
+  "tags": ["customer-support", "llm-agents", "rag"],
+  "triggerCount": 0,
+  "updatedAt": "2025-01-15T00:00:00.000Z",
+  "versionId": "v1.0.0"
+}

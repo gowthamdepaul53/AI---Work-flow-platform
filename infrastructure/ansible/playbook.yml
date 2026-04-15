@@ -1,0 +1,202 @@
+---
+# =============================================================================
+# Ansible Playbook — AI Platform Node Provisioning
+# Provisions Docker + security hardening on GCP/AWS Ubuntu nodes
+# Run: ansible-playbook playbook.yml -i inventory.ini
+# =============================================================================
+
+- name: Provision AI Platform Nodes
+  hosts: platform_nodes
+  become: true
+  gather_facts: true
+  vars:
+    docker_version: "24.0"
+    app_user: "appuser"
+    app_dir: "/opt/ai-platform"
+    log_dir: "/var/log/ai-platform"
+
+  pre_tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+  tasks:
+
+    # ------------------------------------------------------------------
+    # System Setup
+    # ------------------------------------------------------------------
+    - name: Install system dependencies
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - python3-pip
+          - htop
+          - unzip
+          - jq
+        state: present
+
+    - name: Create application user (non-root)
+      user:
+        name: "{{ app_user }}"
+        shell: /bin/bash
+        system: yes
+        create_home: yes
+
+    - name: Create app directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0755"
+      loop:
+        - "{{ app_dir }}"
+        - "{{ log_dir }}"
+
+    # ------------------------------------------------------------------
+    # Docker Installation
+    # ------------------------------------------------------------------
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename }} stable"
+        state: present
+
+    - name: Install Docker
+      apt:
+        name:
+          - "docker-ce={{ docker_version }}*"
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
+        state: present
+        update_cache: yes
+
+    - name: Add app user to docker group
+      user:
+        name: "{{ app_user }}"
+        groups: docker
+        append: yes
+
+    - name: Enable and start Docker
+      systemd:
+        name: docker
+        enabled: yes
+        state: started
+
+    # ------------------------------------------------------------------
+    # Security Hardening (Zero-Trust)
+    # ------------------------------------------------------------------
+    - name: Configure UFW firewall
+      ufw:
+        state: enabled
+        policy: deny
+
+    - name: Allow SSH
+      ufw:
+        rule: allow
+        port: 22
+        proto: tcp
+
+    - name: Allow app port (internal only)
+      ufw:
+        rule: allow
+        port: 8000
+        proto: tcp
+        src: "10.0.0.0/8"   # Internal VPC only
+
+    - name: Allow Prometheus scraping
+      ufw:
+        rule: allow
+        port: 9090
+        proto: tcp
+        src: "10.0.0.0/8"
+
+    - name: Disable root SSH login
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^PermitRootLogin"
+        line: "PermitRootLogin no"
+        state: present
+      notify: Restart SSH
+
+    - name: Disable password authentication (keys only)
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^PasswordAuthentication"
+        line: "PasswordAuthentication no"
+        state: present
+      notify: Restart SSH
+
+    - name: Set kernel security parameters (sysctl)
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        state: present
+        sysctl_set: yes
+      loop:
+        - { key: "net.ipv4.ip_forward", value: "1" }           # Required for K8s
+        - { key: "net.bridge.bridge-nf-call-iptables", value: "1" }
+        - { key: "vm.swappiness", value: "10" }                 # Prefer RAM over swap
+        - { key: "fs.file-max", value: "1000000" }              # High TPS: more file descriptors
+
+    # ------------------------------------------------------------------
+    # Node Exporter (Prometheus metrics)
+    # ------------------------------------------------------------------
+    - name: Install Node Exporter
+      apt:
+        name: prometheus-node-exporter
+        state: present
+
+    - name: Enable Node Exporter
+      systemd:
+        name: prometheus-node-exporter
+        enabled: yes
+        state: started
+
+    # ------------------------------------------------------------------
+    # Log rotation
+    # ------------------------------------------------------------------
+    - name: Configure logrotate for app logs
+      copy:
+        dest: /etc/logrotate.d/ai-platform
+        content: |
+          {{ log_dir }}/*.log {
+            daily
+            rotate 14
+            compress
+            delaycompress
+            missingok
+            notifempty
+            create 0640 {{ app_user }} {{ app_user }}
+          }
+
+  handlers:
+    - name: Restart SSH
+      systemd:
+        name: sshd
+        state: restarted
+
+  post_tasks:
+    - name: Verify Docker is running
+      command: docker info
+      register: docker_info
+      changed_when: false
+
+    - name: Print node summary
+      debug:
+        msg: |
+          ✅ Node provisioned successfully
+          Host: {{ inventory_hostname }}
+          Docker: {{ docker_info.stdout_lines[0] }}
+          User: {{ app_user }}
+          App dir: {{ app_dir }}

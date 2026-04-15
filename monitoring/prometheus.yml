@@ -1,0 +1,63 @@
+# =============================================================================
+# Prometheus Scrape Configuration — AI Workflow Platform
+# =============================================================================
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: ai-platform
+    environment: local
+
+# Alerting
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []  # Add alertmanager:9093 in prod
+
+# Alert rules
+rule_files:
+  - "alerts/*.yml"
+
+scrape_configs:
+
+  # FastAPI app metrics (via prometheus-fastapi-instrumentator)
+  - job_name: ai-platform-api
+    static_configs:
+      - targets: ["api:8000"]
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  # n8n metrics
+  - job_name: n8n
+    static_configs:
+      - targets: ["n8n:5678"]
+    metrics_path: /metrics
+    scrape_interval: 30s
+
+  # ChromaDB
+  - job_name: chromadb
+    static_configs:
+      - targets: ["chromadb:8000"]
+
+  # PostgreSQL exporter
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+
+  # OpenTelemetry Collector self-metrics
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]
+
+  # Kubernetes node metrics (when deployed to K8s)
+  - job_name: kubernetes-nodes
+    kubernetes_sd_configs:
+      - role: node
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)

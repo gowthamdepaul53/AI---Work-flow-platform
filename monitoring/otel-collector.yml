@@ -1,0 +1,97 @@
+# =============================================================================
+# OpenTelemetry Collector Configuration
+# Receives traces/metrics from the FastAPI app and exports to backends
+# =============================================================================
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # Collect host metrics
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu:
+      memory:
+      disk:
+      network:
+
+processors:
+  # Batch spans before export (reduces network calls)
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+  # Add service metadata
+  resource:
+    attributes:
+      - key: service.name
+        value: ai-workflow-platform
+        action: upsert
+      - key: deployment.environment
+        from_attribute: ENVIRONMENT
+        action: insert
+
+  # Memory limiter — prevent OOM in high-traffic scenarios
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  # Filter out health check spans (reduce noise)
+  filter:
+    traces:
+      span:
+        - 'attributes["http.route"] == "/health/live"'
+        - 'attributes["http.route"] == "/health/ready"'
+        - 'attributes["http.route"] == "/metrics"'
+
+exporters:
+
+  # Export traces to Jaeger (local dev)
+  jaeger:
+    endpoint: jaeger:14250
+    tls:
+      insecure: true
+
+  # Export metrics to Prometheus
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: ai_platform
+    const_labels:
+      service: ai-workflow-platform
+
+  # Logging exporter (debug)
+  logging:
+    verbosity: normal
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+  # OTLP export to Google Cloud Trace (prod)
+  # googlecloud:
+  #   project: ${GCP_PROJECT}
+  #   trace:
+  #     bundle_delay_threshold: 200ms
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 0.0.0.0:1777
+
+service:
+  extensions: [health_check, pprof]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, filter, batch, resource]
+      exporters: [jaeger, logging]
+
+    metrics:
+      receivers: [otlp, hostmetrics]
+      processors: [memory_limiter, batch, resource]
+      exporters: [prometheus, logging]

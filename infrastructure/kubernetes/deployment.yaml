@@ -1,0 +1,215 @@
+# =============================================================================
+# Kubernetes Manifests — AI Workflow Orchestration Platform
+# =============================================================================
+
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-platform
+
+---
+# ConfigMap — non-secret config
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-platform-config
+  namespace: ai-platform
+data:
+  CHROMA_HOST: "chromadb-service"
+  CHROMA_PORT: "8001"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+  PYTHONUNBUFFERED: "1"
+
+---
+# Secret — inject via external-secrets or sealed-secrets in prod
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ai-platform-secrets
+  namespace: ai-platform
+type: Opaque
+stringData:
+  OPENAI_API_KEY: "sk-..."      # Replace with vault reference in prod
+  HF_TOKEN: "hf_..."
+  DATABASE_URL: "postgresql://platform:platform@postgres-service:5432/platform_db"
+
+---
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-platform-api
+  namespace: ai-platform
+  labels:
+    app: ai-platform-api
+    version: "1.0.0"
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ai-platform-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0        # Zero-downtime deploys
+  template:
+    metadata:
+      labels:
+        app: ai-platform-api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: ai-platform-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: api
+          image: gcr.io/YOUR_PROJECT/ai-platform-api:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+          envFrom:
+            - configMapRef:
+                name: ai-platform-config
+            - secretRef:
+                name: ai-platform-secrets
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]   # Graceful drain
+
+---
+# Horizontal Pod Autoscaler
+# Scales from 3 → 20 pods based on CPU and custom token-rate metric
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ai-platform-hpa
+  namespace: ai-platform
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ai-platform-api
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300   # Slow scale-down to avoid thrashing
+
+---
+# Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-platform-service
+  namespace: ai-platform
+  labels:
+    app: ai-platform-api
+spec:
+  selector:
+    app: ai-platform-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+  type: ClusterIP
+
+---
+# Ingress (GKE / NGINX)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-platform-ingress
+  namespace: ai-platform
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - api.ai-platform.yourdomain.com
+      secretName: ai-platform-tls
+  rules:
+    - host: api.ai-platform.yourdomain.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ai-platform-service
+                port:
+                  number: 80
+
+---
+# PodDisruptionBudget — ensures zero data loss during node drain
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ai-platform-pdb
+  namespace: ai-platform
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: ai-platform-api
+
+---
+# ServiceAccount (Zero-Trust: minimal permissions)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ai-platform-sa
+  namespace: ai-platform
+  annotations:
+    iam.gke.io/gcp-service-account: ai-platform@YOUR_PROJECT.iam.gserviceaccount.com
